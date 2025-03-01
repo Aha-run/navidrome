@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"regexp"
 	"strings"
@@ -10,14 +11,30 @@ import (
 	"github.com/fatih/structs"
 )
 
-func toSqlArgs(rec interface{}) (map[string]interface{}, error) {
+type PostMapper interface {
+	PostMapArgs(map[string]any) error
+}
+
+func toSQLArgs(rec interface{}) (map[string]interface{}, error) {
 	m := structs.Map(rec)
 	for k, v := range m {
-		if t, ok := v.(time.Time); ok {
-			m[k] = t.Format(time.RFC3339Nano)
+		switch t := v.(type) {
+		case *time.Time:
+			if t != nil {
+				m[k] = *t
+			}
+		case driver.Valuer:
+			var err error
+			m[k], err = t.Value()
+			if err != nil {
+				return nil, err
+			}
 		}
-		if t, ok := v.(*time.Time); ok && t != nil {
-			m[k] = t.Format(time.RFC3339Nano)
+	}
+	if r, ok := rec.(PostMapper); ok {
+		err := r.PostMapArgs(m)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return m, nil
@@ -32,11 +49,27 @@ func toSnakeCase(str string) string {
 	return strings.ToLower(snake)
 }
 
-func exists(subTable string, cond squirrel.Sqlizer) existsCond {
+var matchUnderscore = regexp.MustCompile("_([A-Za-z])")
+
+func toCamelCase(str string) string {
+	return matchUnderscore.ReplaceAllStringFunc(str, func(s string) string {
+		return strings.ToUpper(strings.Replace(s, "_", "", -1))
+	})
+}
+
+// rawSQL is a string that will be used as is in the SQL query executor
+// It does not support arguments
+type rawSQL string
+
+func (r rawSQL) ToSql() (string, []interface{}, error) {
+	return string(r), nil, nil
+}
+
+func Exists(subTable string, cond squirrel.Sqlizer) existsCond {
 	return existsCond{subTable: subTable, cond: cond, not: false}
 }
 
-func notExists(subTable string, cond squirrel.Sqlizer) existsCond {
+func NotExists(subTable string, cond squirrel.Sqlizer) existsCond {
 	return existsCond{subTable: subTable, cond: cond, not: true}
 }
 
@@ -53,4 +86,15 @@ func (e existsCond) ToSql() (string, []interface{}, error) {
 		sql = "not " + sql
 	}
 	return sql, args, err
+}
+
+var sortOrderRegex = regexp.MustCompile(`order_([a-z_]+)`)
+
+// Convert the order_* columns to an expression using sort_* columns. Example:
+// sort_album_name -> (coalesce(nullif(sort_album_name,”),order_album_name) collate nocase)
+// It finds order column names anywhere in the substring
+func mapSortOrder(tableName, order string) string {
+	order = strings.ToLower(order)
+	repl := fmt.Sprintf("(coalesce(nullif(%[1]s.sort_$1,''),%[1]s.order_$1) collate nocase)", tableName)
+	return sortOrderRegex.ReplaceAllString(order, repl)
 }

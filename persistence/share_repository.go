@@ -8,23 +8,25 @@ import (
 	"time"
 
 	. "github.com/Masterminds/squirrel"
-	"github.com/beego/beego/v2/client/orm"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
+	"github.com/pocketbase/dbx"
 )
 
 type shareRepository struct {
 	sqlRepository
-	sqlRestful
 }
 
-func NewShareRepository(ctx context.Context, o orm.QueryExecutor) model.ShareRepository {
+func NewShareRepository(ctx context.Context, db dbx.Builder) model.ShareRepository {
 	r := &shareRepository{}
 	r.ctx = ctx
-	r.ormer = o
-	r.tableName = "share"
+	r.db = db
+	r.registerModel(&model.Share{}, nil)
+	r.setSortMappings(map[string]string{
+		"username": "username",
+	})
 	return r
 }
 
@@ -42,8 +44,9 @@ func (r *shareRepository) selectShare(options ...model.QueryOptions) SelectBuild
 }
 
 func (r *shareRepository) Exists(id string) (bool, error) {
-	return r.exists(Select().Where(Eq{"id": id}))
+	return r.exists(Eq{"id": id})
 }
+
 func (r *shareRepository) Get(id string) (*model.Share, error) {
 	sel := r.selectShare().Where(Eq{"share.id": id})
 	var res model.Share
@@ -77,30 +80,33 @@ func (r *shareRepository) loadMedia(share *model.Share) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	noMissing := func(cond Sqlizer) Sqlizer {
+		return And{cond, Eq{"missing": false}}
+	}
 	switch share.ResourceType {
 	case "artist":
-		albumRepo := NewAlbumRepository(r.ctx, r.ormer)
-		share.Albums, err = albumRepo.GetAll(model.QueryOptions{Filters: Eq{"album_artist_id": ids}, Sort: "artist"})
+		albumRepo := NewAlbumRepository(r.ctx, r.db)
+		share.Albums, err = albumRepo.GetAll(model.QueryOptions{Filters: noMissing(Eq{"album_artist_id": ids}), Sort: "artist"})
 		if err != nil {
 			return err
 		}
-		mfRepo := NewMediaFileRepository(r.ctx, r.ormer)
-		share.Tracks, err = mfRepo.GetAll(model.QueryOptions{Filters: Eq{"album_artist_id": ids}, Sort: "artist"})
+		mfRepo := NewMediaFileRepository(r.ctx, r.db)
+		share.Tracks, err = mfRepo.GetAll(model.QueryOptions{Filters: noMissing(Eq{"album_artist_id": ids}), Sort: "artist"})
 		return err
 	case "album":
-		albumRepo := NewAlbumRepository(r.ctx, r.ormer)
-		share.Albums, err = albumRepo.GetAll(model.QueryOptions{Filters: Eq{"id": ids}})
+		albumRepo := NewAlbumRepository(r.ctx, r.db)
+		share.Albums, err = albumRepo.GetAll(model.QueryOptions{Filters: noMissing(Eq{"id": ids})})
 		if err != nil {
 			return err
 		}
-		mfRepo := NewMediaFileRepository(r.ctx, r.ormer)
-		share.Tracks, err = mfRepo.GetAll(model.QueryOptions{Filters: Eq{"album_id": ids}, Sort: "album"})
+		mfRepo := NewMediaFileRepository(r.ctx, r.db)
+		share.Tracks, err = mfRepo.GetAll(model.QueryOptions{Filters: noMissing(Eq{"album_id": ids}), Sort: "album"})
 		return err
 	case "playlist":
 		// Create a context with a fake admin user, to be able to access all playlists
 		ctx := request.WithUser(r.ctx, model.User{IsAdmin: true})
-		plsRepo := NewPlaylistRepository(ctx, r.ormer)
-		tracks, err := plsRepo.Tracks(ids[0], true).GetAll(model.QueryOptions{Sort: "id"})
+		plsRepo := NewPlaylistRepository(ctx, r.db)
+		tracks, err := plsRepo.Tracks(ids[0], true).GetAll(model.QueryOptions{Sort: "id", Filters: noMissing(Eq{})})
 		if err != nil {
 			return err
 		}
@@ -109,8 +115,8 @@ func (r *shareRepository) loadMedia(share *model.Share) error {
 		}
 		return nil
 	case "media_file":
-		mfRepo := NewMediaFileRepository(r.ctx, r.ormer)
-		tracks, err := mfRepo.GetAll(model.QueryOptions{Filters: Eq{"id": ids}})
+		mfRepo := NewMediaFileRepository(r.ctx, r.db)
+		tracks, err := mfRepo.GetAll(model.QueryOptions{Filters: noMissing(Eq{"media_file.id": ids})})
 		share.Tracks = sortByIdPosition(tracks, ids)
 		return err
 	}
@@ -166,7 +172,7 @@ func (r *shareRepository) CountAll(options ...model.QueryOptions) (int64, error)
 }
 
 func (r *shareRepository) Count(options ...rest.QueryOptions) (int64, error) {
-	return r.CountAll(r.parseRestOptions(options...))
+	return r.CountAll(r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *shareRepository) EntityName() string {
@@ -185,7 +191,7 @@ func (r *shareRepository) Read(id string) (interface{}, error) {
 }
 
 func (r *shareRepository) ReadAll(options ...rest.QueryOptions) (interface{}, error) {
-	sq := r.selectShare(r.parseRestOptions(options...))
+	sq := r.selectShare(r.parseRestOptions(r.ctx, options...))
 	res := model.Shares{}
 	err := r.queryAll(sq, &res)
 	return res, err

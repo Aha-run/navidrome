@@ -1,6 +1,8 @@
 package persistence
 
 import (
+	"database/sql"
+
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/log"
@@ -10,10 +12,31 @@ import (
 
 type playlistTrackRepository struct {
 	sqlRepository
-	sqlRestful
 	playlistId   string
 	playlist     *model.Playlist
 	playlistRepo *playlistRepository
+}
+
+type dbPlaylistTrack struct {
+	dbMediaFile
+	*model.PlaylistTrack `structs:",flatten"`
+}
+
+func (t *dbPlaylistTrack) PostScan() error {
+	if err := t.dbMediaFile.PostScan(); err != nil {
+		return err
+	}
+	t.PlaylistTrack.MediaFile = *t.dbMediaFile.MediaFile
+	t.PlaylistTrack.MediaFile.ID = t.MediaFileID
+	return nil
+}
+
+type dbPlaylistTracks []dbPlaylistTrack
+
+func (t dbPlaylistTracks) toModels() model.PlaylistTracks {
+	return slice.Map(t, func(trk dbPlaylistTrack) model.PlaylistTrack {
+		return *trk.PlaylistTrack
+	})
 }
 
 func (r *playlistRepository) Tracks(playlistId string, refreshSmartPlaylist bool) model.PlaylistTrackRepository {
@@ -21,13 +44,24 @@ func (r *playlistRepository) Tracks(playlistId string, refreshSmartPlaylist bool
 	p.playlistRepo = r
 	p.playlistId = playlistId
 	p.ctx = r.ctx
-	p.ormer = r.ormer
+	p.db = r.db
 	p.tableName = "playlist_tracks"
-	p.sortMappings = map[string]string{
-		"id": "playlist_tracks.id",
-	}
+	p.registerModel(&model.PlaylistTrack{}, map[string]filterFunc{
+		"missing": booleanFilter,
+	})
+	p.setSortMappings(
+		map[string]string{
+			"id":       "playlist_tracks.id",
+			"artist":   "order_artist_name",
+			"album":    "order_album_name, order_album_artist_name",
+			"title":    "order_title",
+			"duration": "duration", // To make sure the field will be whitelisted
+		},
+		"f") // TODO I don't like this solution, but I won't change it now as it's not the focus of BFR.
+
 	pls, err := r.Get(playlistId)
 	if err != nil {
+		log.Warn(r.ctx, "Error getting playlist's tracks", "playlistId", playlistId, err)
 		return nil
 	}
 	if refreshSmartPlaylist {
@@ -38,7 +72,10 @@ func (r *playlistRepository) Tracks(playlistId string, refreshSmartPlaylist bool
 }
 
 func (r *playlistTrackRepository) Count(options ...rest.QueryOptions) (int64, error) {
-	return r.count(Select().Where(Eq{"playlist_id": r.playlistId}), r.parseRestOptions(options...))
+	query := Select().
+		LeftJoin("media_file f on f.id = media_file_id").
+		Where(Eq{"playlist_id": r.playlistId})
+	return r.count(query, r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *playlistTrackRepository) Read(id string) (interface{}, error) {
@@ -47,12 +84,20 @@ func (r *playlistTrackRepository) Read(id string) (interface{}, error) {
 			"annotation.item_id = media_file_id"+
 			" AND annotation.item_type = 'media_file'"+
 			" AND annotation.user_id = '"+userId(r.ctx)+"')").
-		Columns("starred", "starred_at", "play_count", "play_date", "rating", "f.*", "playlist_tracks.*").
+		Columns(
+			"coalesce(starred, 0) as starred",
+			"coalesce(play_count, 0) as play_count",
+			"coalesce(rating, 0) as rating",
+			"starred_at",
+			"play_date",
+			"f.*",
+			"playlist_tracks.*",
+		).
 		Join("media_file f on f.id = media_file_id").
 		Where(And{Eq{"playlist_id": r.playlistId}, Eq{"id": id}})
-	var trk model.PlaylistTrack
+	var trk dbPlaylistTrack
 	err := r.queryOne(sel, &trk)
-	return &trk, err
+	return trk.PlaylistTrack.MediaFile, err
 }
 
 func (r *playlistTrackRepository) GetAll(options ...model.QueryOptions) (model.PlaylistTracks, error) {
@@ -60,24 +105,15 @@ func (r *playlistTrackRepository) GetAll(options ...model.QueryOptions) (model.P
 	if err != nil {
 		return nil, err
 	}
-	mfs := tracks.MediaFiles()
-	err = r.loadMediaFileGenres(&mfs)
-	if err != nil {
-		log.Error(r.ctx, "Error loading genres for playlist", "playlist", r.playlist.Name, "id", r.playlist.ID, err)
-		return nil, err
-	}
-	for i, mf := range mfs {
-		tracks[i].MediaFile.Genres = mf.Genres
-	}
 	return tracks, err
 }
 
 func (r *playlistTrackRepository) GetAlbumIDs(options ...model.QueryOptions) ([]string, error) {
-	sql := r.newSelect(options...).Columns("distinct mf.album_id").
+	query := r.newSelect(options...).Columns("distinct mf.album_id").
 		Join("media_file mf on mf.id = media_file_id").
 		Where(Eq{"playlist_id": r.playlistId})
 	var ids []string
-	err := r.queryAll(sql, &ids)
+	err := r.queryAllSlice(query, &ids)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +121,7 @@ func (r *playlistTrackRepository) GetAlbumIDs(options ...model.QueryOptions) ([]
 }
 
 func (r *playlistTrackRepository) ReadAll(options ...rest.QueryOptions) (interface{}, error) {
-	return r.GetAll(r.parseRestOptions(options...))
+	return r.GetAll(r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *playlistTrackRepository) EntityName() string {
@@ -112,20 +148,20 @@ func (r *playlistTrackRepository) Add(mediaFileIds []string) (int, error) {
 	}
 
 	// Get next pos (ID) in playlist
-	sql := r.newSelect().Columns("max(id) as max").Where(Eq{"playlist_id": r.playlistId})
-	var max int
-	err := r.queryOne(sql, &max)
+	sq := r.newSelect().Columns("max(id) as max").Where(Eq{"playlist_id": r.playlistId})
+	var res struct{ Max sql.NullInt32 }
+	err := r.queryOne(sq, &res)
 	if err != nil {
 		return 0, err
 	}
 
-	return len(mediaFileIds), r.playlistRepo.addTracks(r.playlistId, max+1, mediaFileIds)
+	return len(mediaFileIds), r.playlistRepo.addTracks(r.playlistId, int(res.Max.Int32+1), mediaFileIds)
 }
 
 func (r *playlistTrackRepository) addMediaFileIds(cond Sqlizer) (int, error) {
 	sq := Select("id").From("media_file").Where(cond).OrderBy("album_artist, album, release_date, disc_number, track_number")
 	var ids []string
-	err := r.queryAll(sq, &ids)
+	err := r.queryAllSlice(sq, &ids)
 	if err != nil {
 		log.Error(r.ctx, "Error getting tracks to add to playlist", err)
 		return 0, err
@@ -156,7 +192,7 @@ func (r *playlistTrackRepository) AddDiscs(discs []model.DiscID) (int, error) {
 func (r *playlistTrackRepository) getTracks() ([]string, error) {
 	all := r.newSelect().Columns("media_file_id").Where(Eq{"playlist_id": r.playlistId}).OrderBy("id")
 	var ids []string
-	err := r.queryAll(all, &ids)
+	err := r.queryAllSlice(all, &ids)
 	if err != nil {
 		log.Error(r.ctx, "Error querying current tracks from playlist", "playlistId", r.playlistId, err)
 		return nil, err

@@ -1,11 +1,12 @@
 package persistence
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	. "github.com/Masterminds/squirrel"
-	"github.com/beego/beego/v2/client/orm"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
@@ -13,13 +14,17 @@ import (
 
 const bookmarkTable = "bookmark"
 
-func (r sqlRepository) withBookmark(sql SelectBuilder, idField string) SelectBuilder {
-	return sql.
+func (r sqlRepository) withBookmark(query SelectBuilder, idField string) SelectBuilder {
+	if userId(r.ctx) == invalidUserId {
+		return query
+	}
+	return query.
 		LeftJoin("bookmark on (" +
 			"bookmark.item_id = " + idField +
-			" AND bookmark.item_type = '" + r.tableName + "'" +
+			// item_ids are unique across different item_types, so the clause below is not needed
+			//" AND bookmark.item_type = '" + r.tableName + "'" +
 			" AND bookmark.user_id = '" + userId(r.ctx) + "')").
-		Columns("position as bookmark_position")
+		Columns("coalesce(position, 0) as bookmark_position")
 }
 
 func (r sqlRepository) bmkID(itemID ...string) And {
@@ -45,7 +50,7 @@ func (r sqlRepository) bmkUpsert(itemID, comment string, position int64) error {
 	if err == nil {
 		log.Debug(r.ctx, "Updated bookmark", "id", itemID, "user", user.UserName, "position", position, "comment", comment)
 	}
-	if c == 0 || errors.Is(err, orm.ErrNoRows) {
+	if c == 0 || errors.Is(err, sql.ErrNoRows) {
 		values["user_id"] = user.ID
 		values["item_type"] = r.tableName
 		values["item_id"] = itemID
@@ -82,8 +87,8 @@ func (r sqlRepository) DeleteBookmark(id string) error {
 }
 
 type bookmark struct {
-	UserID    string    `json:"user_id"         orm:"column(user_id)"`
-	ItemID    string    `json:"item_id"         orm:"column(item_id)"`
+	UserID    string    `json:"user_id"`
+	ItemID    string    `json:"item_id"`
 	ItemType  string    `json:"item_type"`
 	Comment   string    `json:"comment"`
 	Position  int64     `json:"position"`
@@ -96,10 +101,11 @@ func (r sqlRepository) GetBookmarks() (model.Bookmarks, error) {
 	user, _ := request.UserFrom(r.ctx)
 
 	idField := r.tableName + ".id"
-	sql := r.newSelectWithAnnotation(idField).Columns("*")
-	sql = r.withBookmark(sql, idField).Where(NotEq{bookmarkTable + ".item_id": nil})
-	var mfs model.MediaFiles
-	err := r.queryAll(sql, &mfs)
+	sq := r.newSelect().Columns(r.tableName + ".*")
+	sq = r.withAnnotation(sq, idField)
+	sq = r.withBookmark(sq, idField).Where(NotEq{bookmarkTable + ".item_id": nil})
+	var mfs dbMediaFiles // TODO Decouple from media_file
+	err := r.queryAll(sq, &mfs)
 	if err != nil {
 		log.Error(r.ctx, "Error getting mediafiles with bookmarks", "user", user.UserName, err)
 		return nil, err
@@ -112,9 +118,9 @@ func (r sqlRepository) GetBookmarks() (model.Bookmarks, error) {
 		mfMap[mf.ID] = i
 	}
 
-	sql = Select("*").From(bookmarkTable).Where(r.bmkID(ids...))
+	sq = Select("*").From(bookmarkTable).Where(r.bmkID(ids...))
 	var bmks []bookmark
-	err = r.queryAll(sql, &bmks)
+	err = r.queryAll(sq, &bmks)
 	if err != nil {
 		log.Error(r.ctx, "Error getting bookmarks", "user", user.UserName, "ids", ids, err)
 		return nil, err
@@ -132,7 +138,7 @@ func (r sqlRepository) GetBookmarks() (model.Bookmarks, error) {
 				CreatedAt: bmk.CreatedAt,
 				UpdatedAt: bmk.UpdatedAt,
 				ChangedBy: bmk.ChangedBy,
-				Item:      mfs[itemIdx],
+				Item:      *mfs[itemIdx].MediaFile,
 			}
 		}
 	}
@@ -143,7 +149,7 @@ func (r sqlRepository) cleanBookmarks() error {
 	del := Delete(bookmarkTable).Where(Eq{"item_type": r.tableName}).Where("item_id not in (select id from " + r.tableName + ")")
 	c, err := r.executeSQL(del)
 	if err != nil {
-		return err
+		return fmt.Errorf("error cleaning up bookmarks: %w", err)
 	}
 	if c > 0 {
 		log.Debug(r.ctx, "Clean-up bookmarks", "totalDeleted", c)

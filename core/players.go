@@ -5,58 +5,72 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/navidrome/navidrome/conf"
+	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/model/request"
+	"github.com/navidrome/navidrome/utils"
 )
 
 type Players interface {
 	Get(ctx context.Context, playerId string) (*model.Player, error)
-	Register(ctx context.Context, id, client, typ, ip string) (*model.Player, *model.Transcoding, error)
+	Register(ctx context.Context, id, client, userAgent, ip string) (*model.Player, *model.Transcoding, error)
 }
 
 func NewPlayers(ds model.DataStore) Players {
-	return &players{ds}
+	return &players{
+		ds:      ds,
+		limiter: utils.Limiter{Interval: consts.UpdatePlayerFrequency},
+	}
 }
 
 type players struct {
-	ds model.DataStore
+	ds      model.DataStore
+	limiter utils.Limiter
 }
 
-func (p *players) Register(ctx context.Context, id, client, userAgent, ip string) (*model.Player, *model.Transcoding, error) {
+func (p *players) Register(ctx context.Context, playerID, client, userAgent, ip string) (*model.Player, *model.Transcoding, error) {
 	var plr *model.Player
 	var trc *model.Transcoding
 	var err error
-	userName, _ := request.UsernameFrom(ctx)
-	if id != "" {
-		plr, err = p.ds.Player(ctx).Get(id)
+	user, _ := request.UserFrom(ctx)
+	if playerID != "" {
+		plr, err = p.ds.Player(ctx).Get(playerID)
 		if err == nil && plr.Client != client {
-			id = ""
+			playerID = ""
 		}
 	}
-	if err != nil || id == "" {
-		plr, err = p.ds.Player(ctx).FindMatch(userName, client, userAgent)
+	username := userName(ctx)
+	if err != nil || playerID == "" {
+		plr, err = p.ds.Player(ctx).FindMatch(user.ID, client, userAgent)
 		if err == nil {
-			log.Debug(ctx, "Found matching player", "id", plr.ID, "client", client, "username", userName, "type", userAgent)
+			log.Debug(ctx, "Found matching player", "id", plr.ID, "client", client, "username", username, "type", userAgent)
 		} else {
 			plr = &model.Player{
-				ID:              uuid.NewString(),
-				UserName:        userName,
+				ID:              id.NewRandom(),
+				UserId:          user.ID,
 				Client:          client,
 				ScrobbleEnabled: true,
+				ReportRealPath:  conf.Server.DefaultReportRealPath,
 			}
-			log.Info(ctx, "Registering new player", "id", plr.ID, "client", client, "username", userName, "type", userAgent)
+			log.Info(ctx, "Registering new player", "id", plr.ID, "client", client, "username", username, "type", userAgent)
 		}
 	}
 	plr.Name = fmt.Sprintf("%s [%s]", client, userAgent)
 	plr.UserAgent = userAgent
-	plr.IPAddress = ip
+	plr.IP = ip
 	plr.LastSeen = time.Now()
-	err = p.ds.Player(ctx).Put(plr)
-	if err != nil {
-		return nil, nil, err
-	}
+	p.limiter.Do(plr.ID, func() {
+		ctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+
+		err = p.ds.Player(ctx).Put(plr)
+		if err != nil {
+			log.Warn(ctx, "Could not save player", "id", plr.ID, "client", client, "username", username, "type", userAgent, err)
+		}
+	})
 	if plr.TranscodingId != "" {
 		trc, err = p.ds.Transcoding(ctx).Get(plr.TranscodingId)
 	}

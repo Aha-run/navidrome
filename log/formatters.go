@@ -1,8 +1,15 @@
 package log
 
 import (
+	"fmt"
+	"io"
+	"iter"
+	"reflect"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/navidrome/navidrome/utils/slice"
 )
 
 func ShortDur(d time.Duration) string {
@@ -19,11 +26,49 @@ func ShortDur(d time.Duration) string {
 	default:
 		s = d.String()
 	}
-	if strings.HasSuffix(s, "m0s") {
-		s = s[:len(s)-2]
+	s = strings.TrimSuffix(s, "0s")
+	return strings.TrimSuffix(s, "0m")
+}
+
+func StringerValue(s fmt.Stringer) string {
+	v := reflect.ValueOf(s)
+	if v.Kind() == reflect.Pointer && v.IsNil() {
+		return "nil"
 	}
-	if strings.HasSuffix(s, "h0m") {
-		s = s[:len(s)-2]
+	return s.String()
+}
+
+func formatSeq[T any](v iter.Seq[T]) string {
+	return formatSlice(slices.Collect(v))
+}
+
+func formatSlice[T any](v []T) string {
+	s := slice.Map(v, func(x T) string { return fmt.Sprintf("%v", x) })
+	return fmt.Sprintf("[`%s`]", strings.Join(s, "`,`"))
+}
+
+func CRLFWriter(w io.Writer) io.Writer {
+	return &crlfWriter{w: w}
+}
+
+type crlfWriter struct {
+	w        io.Writer
+	lastByte byte
+}
+
+func (cw *crlfWriter) Write(p []byte) (int, error) {
+	var written int
+	for _, b := range p {
+		if b == '\n' && cw.lastByte != '\r' {
+			if _, err := cw.w.Write([]byte{'\r'}); err != nil {
+				return written, err
+			}
+		}
+		if _, err := cw.w.Write([]byte{b}); err != nil {
+			return written, err
+		}
+		written++
+		cw.lastByte = b
 	}
-	return s
+	return written, nil
 }

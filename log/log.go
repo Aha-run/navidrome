@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"iter"
 	"net/http"
 	"os"
 	"runtime"
@@ -14,7 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-type Level uint8
+type Level uint32
 
 type LevelFunc = func(ctx interface{}, msg interface{}, keyValuePairs ...interface{})
 
@@ -106,7 +108,9 @@ func levelFromString(l string) Level {
 	return level
 }
 
+// SetLogLevels sets the log levels for specific paths in the codebase.
 func SetLogLevels(levels map[string]string) {
+	logLevels = nil
 	for k, v := range levels {
 		logLevels = append(logLevels, levelPath{path: k, level: levelFromString(v)})
 	}
@@ -123,6 +127,13 @@ func SetRedacting(enabled bool) {
 	if enabled {
 		defaultLogger.AddHook(redacted)
 	}
+}
+
+func SetOutput(w io.Writer) {
+	if runtime.GOOS == "windows" {
+		w = CRLFWriter(w)
+	}
+	defaultLogger.SetOutput(w)
 }
 
 // Redact applies redaction to a single string
@@ -154,6 +165,11 @@ func CurrentLevel() Level {
 	return currentLevel
 }
 
+// IsGreaterOrEqualTo returns true if the caller's current log level is equal or greater than the provided level.
+func IsGreaterOrEqualTo(level Level) bool {
+	return shouldLog(level, 2)
+}
+
 func Fatal(args ...interface{}) {
 	log(LevelFatal, args...)
 	os.Exit(1)
@@ -180,14 +196,14 @@ func Trace(args ...interface{}) {
 }
 
 func log(level Level, args ...interface{}) {
-	if !shouldLog(level) {
+	if !shouldLog(level, 3) {
 		return
 	}
 	logger, msg := parseArgs(args)
 	logger.Log(logrus.Level(level), msg)
 }
 
-func shouldLog(requiredLevel Level) bool {
+func shouldLog(requiredLevel Level, skip int) bool {
 	if currentLevel >= requiredLevel {
 		return true
 	}
@@ -195,7 +211,7 @@ func shouldLog(requiredLevel Level) bool {
 		return false
 	}
 
-	_, file, _, ok := runtime.Caller(3)
+	_, file, _, ok := runtime.Caller(skip)
 	if !ok {
 		return false
 	}
@@ -261,7 +277,11 @@ func addFields(logger *logrus.Entry, keyValuePairs []interface{}) *logrus.Entry 
 				case time.Duration:
 					logger = logger.WithField(name, ShortDur(v))
 				case fmt.Stringer:
-					logger = logger.WithField(name, v.String())
+					logger = logger.WithField(name, StringerValue(v))
+				case iter.Seq[string]:
+					logger = logger.WithField(name, formatSeq(v))
+				case []string:
+					logger = logger.WithField(name, formatSlice(v))
 				default:
 					logger = logger.WithField(name, v)
 				}

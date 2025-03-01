@@ -5,49 +5,52 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/Masterminds/squirrel"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/ffmpeg"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 )
 
 func initialSetup(ds model.DataStore) {
+	ctx := context.TODO()
 	_ = ds.WithTx(func(tx model.DataStore) error {
-		properties := ds.Property(context.TODO())
+		if err := tx.Library(ctx).StoreMusicFolder(); err != nil {
+			return err
+		}
+
+		properties := tx.Property(ctx)
 		_, err := properties.Get(consts.InitialSetupFlagKey)
 		if err == nil {
 			return nil
 		}
 		log.Info("Running initial setup")
-		if err = createJWTSecret(ds); err != nil {
-			return err
-		}
-
 		if conf.Server.DevAutoCreateAdminPassword != "" {
-			if err = createInitialAdminUser(ds, conf.Server.DevAutoCreateAdminPassword); err != nil {
+			if err = createInitialAdminUser(tx, conf.Server.DevAutoCreateAdminPassword); err != nil {
 				return err
 			}
 		}
 
 		err = properties.Put(consts.InitialSetupFlagKey, time.Now().String())
 		return err
-	})
+	}, "initial setup")
 }
 
+// If the Dev Admin user is not present, create it
 func createInitialAdminUser(ds model.DataStore, initialPassword string) error {
 	users := ds.User(context.TODO())
-	c, err := users.CountAll()
+	c, err := users.CountAll(model.QueryOptions{Filters: squirrel.Eq{"user_name": consts.DevInitialUserName}})
 	if err != nil {
 		panic(fmt.Sprintf("Could not access User table: %s", err))
 	}
 	if c == 0 {
-		id := uuid.NewString()
+		newID := id.NewRandom()
 		log.Warn("Creating initial admin user. This should only be used for development purposes!!",
-			"user", consts.DevInitialUserName, "password", initialPassword, "id", id)
+			"user", consts.DevInitialUserName, "password", initialPassword, "id", newID)
 		initialUser := model.User{
-			ID:          id,
+			ID:          newID,
 			UserName:    consts.DevInitialUserName,
 			Name:        consts.DevInitialName,
 			Email:       "",
@@ -62,21 +65,7 @@ func createInitialAdminUser(ds model.DataStore, initialPassword string) error {
 	return err
 }
 
-func createJWTSecret(ds model.DataStore) error {
-	properties := ds.Property(context.TODO())
-	_, err := properties.Get(consts.JWTSecretKey)
-	if err == nil {
-		return nil
-	}
-	log.Info("Creating new JWT secret, used for encrypting UI sessions")
-	err = properties.Put(consts.JWTSecretKey, uuid.NewString())
-	if err != nil {
-		log.Error("Could not save JWT secret in DB", err)
-	}
-	return err
-}
-
-func checkFfmpegInstallation() {
+func checkFFmpegInstallation() {
 	f := ffmpeg.New()
 	_, err := f.CmdPath()
 	if err == nil {

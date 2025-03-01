@@ -1,25 +1,28 @@
 package consts
 
 import (
-	"crypto/md5"
-	"fmt"
-	"path/filepath"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/navidrome/navidrome/model/id"
 )
 
 const (
 	AppName = "navidrome"
 
-	DefaultDbPath       = "navidrome.db?cache=shared&_busy_timeout=15000&_journal_mode=WAL&_foreign_keys=on"
-	InitialSetupFlagKey = "InitialSetup"
+	DefaultDbPath                 = "navidrome.db?cache=shared&_busy_timeout=15000&_journal_mode=WAL&_foreign_keys=on&synchronous=normal"
+	InitialSetupFlagKey           = "InitialSetup"
+	FullScanAfterMigrationFlagKey = "FullScanAfterMigration"
 
 	UIAuthorizationHeader  = "X-ND-Authorization"
 	UIClientUniqueIDHeader = "X-ND-Client-Unique-Id"
 	JWTSecretKey           = "JWTSecret"
 	JWTIssuer              = "ND"
-	DefaultSessionTimeout  = 24 * time.Hour
+	DefaultSessionTimeout  = 48 * time.Hour
 	CookieExpiry           = 365 * 24 * 3600 // One year
+
+	OptimizeDBSchedule = "@every 24h"
 
 	// DefaultEncryptionKey This is the encryption key used if none is specified in the `PasswordEncryptionKey` option
 	// Never ever change this! Or it will break all Navidrome installations that don't set the config option
@@ -50,14 +53,16 @@ const (
 
 	ServerReadHeaderTimeout = 3 * time.Second
 
-	ArtistInfoTimeToLive = 24 * time.Hour
-	AlbumInfoTimeToLive  = 7 * 24 * time.Hour
+	ArtistInfoTimeToLive      = 24 * time.Hour
+	AlbumInfoTimeToLive       = 7 * 24 * time.Hour
+	UpdateLastAccessFrequency = time.Minute
+	UpdatePlayerFrequency     = time.Minute
 
-	I18nFolder   = "i18n"
-	SkipScanFile = ".ndignore"
+	I18nFolder     = "i18n"
+	ScanIgnoreFile = ".ndignore"
 
 	PlaceholderArtistArt = "artist-placeholder.webp"
-	PlaceholderAlbumArt  = "placeholder.png"
+	PlaceholderAlbumArt  = "album-placeholder.webp"
 	PlaceholderAvatar    = "logo-192x192.png"
 	UICoverArtSize       = 300
 	DefaultUIVolume      = 100
@@ -65,8 +70,14 @@ const (
 	DefaultHttpClientTimeOut = 10 * time.Second
 
 	DefaultScannerExtractor = "taglib"
+	DefaultWatcherWait      = 5 * time.Second
+	Zwsp                    = string('\u200b')
+)
 
-	Zwsp = string('\u200b')
+// Prometheus options
+const (
+	PrometheusDefaultPath = "/metrics"
+	PrometheusAuthUser    = "navidrome"
 )
 
 // Cache options
@@ -81,45 +92,72 @@ const (
 	DefaultCacheCleanUpInterval = 10 * time.Minute
 )
 
-// Shared secrets (only add here "secrets" that can be public)
 const (
-	LastFMAPIKey    = "9b94a5515ea66b2da3ec03c12300327e" // nolint:gosec
-	LastFMAPISecret = "74cb6557cec7171d921af5d7d887c587" // nolint:gosec
+	AlbumPlayCountModeAbsolute   = "absolute"
+	AlbumPlayCountModeNormalized = "normalized"
+)
+
+const (
+	//DefaultAlbumPID = "album_legacy"
+	DefaultAlbumPID = "musicbrainz_albumid|albumartistid,album,albumversion,releasedate"
+	DefaultTrackPID = "musicbrainz_trackid|albumid,discnumber,tracknumber,title"
+	PIDAlbumKey     = "PIDAlbum"
+	PIDTrackKey     = "PIDTrack"
+)
+
+const (
+	InsightsIDKey          = "InsightsID"
+	InsightsEndpoint       = "https://insights.navidrome.org/collect"
+	InsightsUpdateInterval = 24 * time.Hour
+	InsightsInitialDelay   = 30 * time.Minute
 )
 
 var (
 	DefaultDownsamplingFormat = "opus"
-	DefaultTranscodings       = []map[string]interface{}{
+	DefaultTranscodings       = []struct {
+		Name           string
+		TargetFormat   string
+		DefaultBitRate int
+		Command        string
+	}{
 		{
-			"name":           "mp3 audio",
-			"targetFormat":   "mp3",
-			"defaultBitRate": 192,
-			"command":        "ffmpeg -i %s -map 0:a:0 -b:a %bk -v 0 -f mp3 -",
+			Name:           "mp3 audio",
+			TargetFormat:   "mp3",
+			DefaultBitRate: 192,
+			Command:        "ffmpeg -i %s -ss %t -map 0:a:0 -b:a %bk -v 0 -f mp3 -",
 		},
 		{
-			"name":           "opus audio",
-			"targetFormat":   "opus",
-			"defaultBitRate": 128,
-			"command":        "ffmpeg -i %s -map 0:a:0 -b:a %bk -v 0 -c:a libopus -f opus -",
+			Name:           "opus audio",
+			TargetFormat:   "opus",
+			DefaultBitRate: 128,
+			Command:        "ffmpeg -i %s -ss %t -map 0:a:0 -b:a %bk -v 0 -c:a libopus -f opus -",
 		},
 		{
-			"name":           "aac audio",
-			"targetFormat":   "aac",
-			"defaultBitRate": 256,
-			"command":        "ffmpeg -i %s -map 0:a:0 -b:a %bk -v 0 -c:a aac -f adts -",
+			Name:           "aac audio",
+			TargetFormat:   "aac",
+			DefaultBitRate: 256,
+			Command:        "ffmpeg -i %s -ss %t -map 0:a:0 -b:a %bk -v 0 -c:a aac -f adts -",
 		},
 	}
-
-	DefaultPlaylistsPath = strings.Join([]string{".", "**/**"}, string(filepath.ListSeparator))
 )
 
 var (
-	VariousArtists      = "Various Artists"
-	VariousArtistsID    = fmt.Sprintf("%x", md5.Sum([]byte(strings.ToLower(VariousArtists))))
-	UnknownAlbum        = "[Unknown Album]"
-	UnknownArtist       = "[Unknown Artist]"
-	UnknownArtistID     = fmt.Sprintf("%x", md5.Sum([]byte(strings.ToLower(UnknownArtist))))
+	VariousArtists = "Various Artists"
+	// TODO This will be dynamic when using disambiguation
+	VariousArtistsID = "63sqASlAfjbGMuLP4JhnZU"
+	UnknownAlbum     = "[Unknown Album]"
+	UnknownArtist    = "[Unknown Artist]"
+	// TODO This will be dynamic when using disambiguation
+	UnknownArtistID     = id.NewHash(strings.ToLower(UnknownArtist))
 	VariousArtistsMbzId = "89ad4ac3-39f7-470e-963a-56509c546377"
 
 	ServerStart = time.Now()
 )
+
+var InContainer = func() bool {
+	// Check if the /.nddockerenv file exists
+	if _, err := os.Stat("/.nddockerenv"); err == nil {
+		return true
+	}
+	return false
+}()

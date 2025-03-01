@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 
-	"github.com/beego/beego/v2/client/orm"
 	"github.com/deluan/rest"
-	"github.com/google/uuid"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -19,7 +18,7 @@ var _ = Describe("UserRepository", func() {
 	var repo model.UserRepository
 
 	BeforeEach(func() {
-		repo = NewUserRepository(log.NewContext(context.TODO()), orm.NewOrm())
+		repo = NewUserRepository(log.NewContext(context.TODO()), GetDBXBuilder())
 	})
 
 	Describe("Put/Get/FindByUsername", func() {
@@ -87,7 +86,7 @@ var _ = Describe("UserRepository", func() {
 			var user model.User
 			BeforeEach(func() {
 				loggedUser.IsAdmin = false
-				loggedUser.Password = consts.PasswordAutogenPrefix + uuid.NewString()
+				loggedUser.Password = consts.PasswordAutogenPrefix + id.NewRandom()
 			})
 			It("does nothing if passwords are not specified", func() {
 				user = *loggedUser

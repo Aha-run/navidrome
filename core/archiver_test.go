@@ -25,8 +25,8 @@ var _ = Describe("Archiver", func() {
 
 	BeforeEach(func() {
 		ms = &mockMediaStreamer{}
-		ds = &mockDataStore{}
 		sh = &mockShare{}
+		ds = &mockDataStore{}
 		arch = core.NewArchiver(ms, ds, sh)
 	})
 
@@ -44,7 +44,7 @@ var _ = Describe("Archiver", func() {
 			}}).Return(mfs, nil)
 
 			ds.On("MediaFile", mock.Anything).Return(mfRepo)
-			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128).Return(io.NopCloser(strings.NewReader("test")), nil).Times(3)
+			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128, 0).Return(io.NopCloser(strings.NewReader("test")), nil).Times(3)
 
 			out := new(bytes.Buffer)
 			err := arch.ZipAlbum(context.Background(), "1", "mp3", 128, out)
@@ -73,7 +73,7 @@ var _ = Describe("Archiver", func() {
 			}}).Return(mfs, nil)
 
 			ds.On("MediaFile", mock.Anything).Return(mfRepo)
-			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128).Return(io.NopCloser(strings.NewReader("test")), nil).Times(2)
+			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128, 0).Return(io.NopCloser(strings.NewReader("test")), nil).Times(2)
 
 			out := new(bytes.Buffer)
 			err := arch.ZipArtist(context.Background(), "1", "mp3", 128, out)
@@ -104,7 +104,7 @@ var _ = Describe("Archiver", func() {
 			}
 
 			sh.On("Load", mock.Anything, "1").Return(share, nil)
-			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128).Return(io.NopCloser(strings.NewReader("test")), nil).Times(2)
+			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128, 0).Return(io.NopCloser(strings.NewReader("test")), nil).Times(2)
 
 			out := new(bytes.Buffer)
 			err := arch.ZipShare(context.Background(), "1", out)
@@ -134,9 +134,9 @@ var _ = Describe("Archiver", func() {
 			}
 
 			plRepo := &mockPlaylistRepository{}
-			plRepo.On("GetWithTracks", "1", true).Return(pls, nil)
+			plRepo.On("GetWithTracks", "1", true, false).Return(pls, nil)
 			ds.On("Playlist", mock.Anything).Return(plRepo)
-			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128).Return(io.NopCloser(strings.NewReader("test")), nil).Times(2)
+			ms.On("DoStream", mock.Anything, mock.Anything, "mp3", 128, 0).Return(io.NopCloser(strings.NewReader("test")), nil).Times(2)
 
 			out := new(bytes.Buffer)
 			err := arch.ZipPlaylist(context.Background(), "1", "mp3", 128, out)
@@ -167,6 +167,19 @@ func (m *mockDataStore) Playlist(ctx context.Context) model.PlaylistRepository {
 	return args.Get(0).(model.PlaylistRepository)
 }
 
+func (m *mockDataStore) Library(context.Context) model.LibraryRepository {
+	return &mockLibraryRepository{}
+}
+
+type mockLibraryRepository struct {
+	mock.Mock
+	model.LibraryRepository
+}
+
+func (m *mockLibraryRepository) GetPath(id int) (string, error) {
+	return "/music", nil
+}
+
 type mockMediaFileRepository struct {
 	mock.Mock
 	model.MediaFileRepository
@@ -182,8 +195,8 @@ type mockPlaylistRepository struct {
 	model.PlaylistRepository
 }
 
-func (m *mockPlaylistRepository) GetWithTracks(id string, includeTracks bool) (*model.Playlist, error) {
-	args := m.Called(id, includeTracks)
+func (m *mockPlaylistRepository) GetWithTracks(id string, refreshSmartPlaylists, includeMissing bool) (*model.Playlist, error) {
+	args := m.Called(id, refreshSmartPlaylists, includeMissing)
 	return args.Get(0).(*model.Playlist), args.Error(1)
 }
 
@@ -192,8 +205,8 @@ type mockMediaStreamer struct {
 	core.MediaStreamer
 }
 
-func (m *mockMediaStreamer) DoStream(ctx context.Context, mf *model.MediaFile, format string, bitrate int) (*core.Stream, error) {
-	args := m.Called(ctx, mf, format, bitrate)
+func (m *mockMediaStreamer) DoStream(ctx context.Context, mf *model.MediaFile, reqFormat string, reqBitRate int, reqOffset int) (*core.Stream, error) {
+	args := m.Called(ctx, mf, reqFormat, reqBitRate, reqOffset)
 	if args.Error(1) != nil {
 		return nil, args.Error(1)
 	}

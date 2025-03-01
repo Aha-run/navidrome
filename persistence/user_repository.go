@@ -10,19 +10,18 @@ import (
 	"time"
 
 	. "github.com/Masterminds/squirrel"
-	"github.com/beego/beego/v2/client/orm"
 	"github.com/deluan/rest"
-	"github.com/google/uuid"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/utils"
+	"github.com/pocketbase/dbx"
 )
 
 type userRepository struct {
 	sqlRepository
-	sqlRestful
 }
 
 var (
@@ -30,11 +29,13 @@ var (
 	encKey []byte
 )
 
-func NewUserRepository(ctx context.Context, o orm.QueryExecutor) model.UserRepository {
+func NewUserRepository(ctx context.Context, db dbx.Builder) model.UserRepository {
 	r := &userRepository{}
 	r.ctx = ctx
-	r.ormer = o
-	r.tableName = "user"
+	r.db = db
+	r.registerModel(&model.User{}, map[string]filterFunc{
+		"password": invalidFilter(ctx),
+	})
 	once.Do(func() {
 		_ = r.initPasswordEncryptionKey()
 	})
@@ -49,25 +50,34 @@ func (r *userRepository) Get(id string) (*model.User, error) {
 	sel := r.newSelect().Columns("*").Where(Eq{"id": id})
 	var res model.User
 	err := r.queryOne(sel, &res)
-	return &res, err
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 func (r *userRepository) GetAll(options ...model.QueryOptions) (model.Users, error) {
 	sel := r.newSelect(options...).Columns("*")
 	res := model.Users{}
 	err := r.queryAll(sel, &res)
-	return res, err
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func (r *userRepository) Put(u *model.User) error {
 	if u.ID == "" {
-		u.ID = uuid.NewString()
+		u.ID = id.NewRandom()
 	}
 	u.UpdatedAt = time.Now()
 	if u.NewPassword != "" {
 		_ = r.encryptPassword(u)
 	}
-	values, _ := toSqlArgs(*u)
+	values, err := toSQLArgs(*u)
+	if err != nil {
+		return fmt.Errorf("error converting user to SQL args: %w", err)
+	}
 	delete(values, "current_password")
 	update := Update(r.tableName).Where(Eq{"id": u.ID}).SetMap(values)
 	count, err := r.executeSQL(update)
@@ -87,22 +97,29 @@ func (r *userRepository) FindFirstAdmin() (*model.User, error) {
 	sel := r.newSelect(model.QueryOptions{Sort: "updated_at", Max: 1}).Columns("*").Where(Eq{"is_admin": true})
 	var usr model.User
 	err := r.queryOne(sel, &usr)
-	return &usr, err
+	if err != nil {
+		return nil, err
+	}
+	return &usr, nil
 }
 
 func (r *userRepository) FindByUsername(username string) (*model.User, error) {
-	sel := r.newSelect().Columns("*").Where(Like{"user_name": username})
+	sel := r.newSelect().Columns("*").Where(Expr("user_name = ? COLLATE NOCASE", username))
 	var usr model.User
 	err := r.queryOne(sel, &usr)
-	return &usr, err
+	if err != nil {
+		return nil, err
+	}
+	return &usr, nil
 }
 
 func (r *userRepository) FindByUsernameWithPassword(username string) (*model.User, error) {
 	usr, err := r.FindByUsername(username)
-	if err == nil {
-		_ = r.decryptPassword(usr)
+	if err != nil {
+		return nil, err
 	}
-	return usr, err
+	_ = r.decryptPassword(usr)
+	return usr, nil
 }
 
 func (r *userRepository) UpdateLastLoginAt(id string) error {
@@ -123,10 +140,10 @@ func (r *userRepository) Count(options ...rest.QueryOptions) (int64, error) {
 	if !usr.IsAdmin {
 		return 0, rest.ErrPermissionDenied
 	}
-	return r.CountAll(r.parseRestOptions(options...))
+	return r.CountAll(r.parseRestOptions(r.ctx, options...))
 }
 
-func (r *userRepository) Read(id string) (interface{}, error) {
+func (r *userRepository) Read(id string) (any, error) {
 	usr := loggedUser(r.ctx)
 	if !usr.IsAdmin && usr.ID != id {
 		return nil, rest.ErrPermissionDenied
@@ -138,23 +155,23 @@ func (r *userRepository) Read(id string) (interface{}, error) {
 	return usr, err
 }
 
-func (r *userRepository) ReadAll(options ...rest.QueryOptions) (interface{}, error) {
+func (r *userRepository) ReadAll(options ...rest.QueryOptions) (any, error) {
 	usr := loggedUser(r.ctx)
 	if !usr.IsAdmin {
 		return nil, rest.ErrPermissionDenied
 	}
-	return r.GetAll(r.parseRestOptions(options...))
+	return r.GetAll(r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *userRepository) EntityName() string {
 	return "user"
 }
 
-func (r *userRepository) NewInstance() interface{} {
+func (r *userRepository) NewInstance() any {
 	return &model.User{}
 }
 
-func (r *userRepository) Save(entity interface{}) (string, error) {
+func (r *userRepository) Save(entity any) (string, error) {
 	usr := loggedUser(r.ctx)
 	if !usr.IsAdmin {
 		return "", rest.ErrPermissionDenied
@@ -170,7 +187,7 @@ func (r *userRepository) Save(entity interface{}) (string, error) {
 	return u.ID, err
 }
 
-func (r *userRepository) Update(id string, entity interface{}, cols ...string) error {
+func (r *userRepository) Update(id string, entity any, _ ...string) error {
 	u := entity.(*model.User)
 	u.ID = id
 	usr := loggedUser(r.ctx)
@@ -268,7 +285,7 @@ func (r *userRepository) initPasswordEncryptionKey() error {
 	key := keyTo32Bytes(conf.Server.PasswordEncryptionKey)
 	keySum := fmt.Sprintf("%x", sha256.Sum256(key))
 
-	props := NewPropertyRepository(r.ctx, r.ormer)
+	props := NewPropertyRepository(r.ctx, r.db)
 	savedKeySum, err := props.Get(consts.PasswordsEncryptedKey)
 
 	// If passwords are already encrypted

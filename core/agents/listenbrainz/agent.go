@@ -11,7 +11,8 @@ import (
 	"github.com/navidrome/navidrome/core/scrobbler"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/utils"
+	"github.com/navidrome/navidrome/utils/cache"
+	"github.com/navidrome/navidrome/utils/slice"
 )
 
 const (
@@ -35,7 +36,7 @@ func listenBrainzConstructor(ds model.DataStore) *listenBrainzAgent {
 	hc := &http.Client{
 		Timeout: consts.DefaultHttpClientTimeOut,
 	}
-	chc := utils.NewCachedHTTPClient(hc, consts.DefaultHttpClientTimeOut)
+	chc := cache.NewHTTPClient(hc, consts.DefaultHttpClientTimeOut)
 	l.client = newClient(l.baseURL, chc)
 	return l
 }
@@ -45,6 +46,12 @@ func (l *listenBrainzAgent) AgentName() string {
 }
 
 func (l *listenBrainzAgent) formatListen(track *model.MediaFile) listenInfo {
+	artistMBIDs := slice.Map(track.Participants[model.RoleArtist], func(p model.Participant) string {
+		return p.MbzArtistID
+	})
+	artistNames := slice.Map(track.Participants[model.RoleArtist], func(p model.Participant) string {
+		return p.Name
+	})
 	li := listenInfo{
 		TrackMetadata: trackMetadata{
 			ArtistName:  track.Artist,
@@ -54,9 +61,11 @@ func (l *listenBrainzAgent) formatListen(track *model.MediaFile) listenInfo {
 				SubmissionClient:        consts.AppName,
 				SubmissionClientVersion: consts.Version,
 				TrackNumber:             track.TrackNumber,
-				ArtistMbzIDs:            []string{track.MbzArtistID},
-				RecordingMbzID:          track.MbzRecordingID,
-				ReleaseMbID:             track.MbzAlbumID,
+				ArtistNames:             artistNames,
+				ArtistMBIDs:             artistMBIDs,
+				RecordingMBID:           track.MbzRecordingID,
+				ReleaseMBID:             track.MbzAlbumID,
+				ReleaseGroupMBID:        track.MbzReleaseGroupID,
 				DurationMs:              int(track.Duration * 1000),
 			},
 		},

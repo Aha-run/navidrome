@@ -4,9 +4,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 )
 
 func CreateMockArtistRepo() *MockArtistRepo {
@@ -50,12 +49,12 @@ func (m *MockArtistRepo) Get(id string) (*model.Artist, error) {
 	return nil, model.ErrNotFound
 }
 
-func (m *MockArtistRepo) Put(ar *model.Artist) error {
+func (m *MockArtistRepo) Put(ar *model.Artist, columsToUpdate ...string) error {
 	if m.err {
 		return errors.New("error")
 	}
 	if ar.ID == "" {
-		ar.ID = uuid.NewString()
+		ar.ID = id.NewRandom()
 	}
 	m.data[ar.ID] = ar
 	return nil
@@ -67,7 +66,7 @@ func (m *MockArtistRepo) IncPlayCount(id string, timestamp time.Time) error {
 	}
 	if d, ok := m.data[id]; ok {
 		d.PlayCount++
-		d.PlayDate = timestamp
+		d.PlayDate = &timestamp
 		return nil
 	}
 	return model.ErrNotFound

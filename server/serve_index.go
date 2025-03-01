@@ -6,16 +6,18 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
+	"github.com/navidrome/navidrome/conf/mime"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/utils"
 	"github.com/navidrome/navidrome/utils/slice"
+	"github.com/navidrome/navidrome/utils/str"
 )
 
 func Index(ds model.DataStore, fs fs.FS) http.HandlerFunc {
@@ -41,9 +43,9 @@ func serveIndex(ds model.DataStore, fs fs.FS, shareInfo *model.Share) http.Handl
 			"version":                   consts.Version,
 			"firstTime":                 firstTime,
 			"variousArtistsId":          consts.VariousArtistsID,
-			"baseURL":                   utils.SanitizeText(strings.TrimSuffix(conf.Server.BasePath, "/")),
-			"loginBackgroundURL":        utils.SanitizeText(conf.Server.UILoginBackgroundURL),
-			"welcomeMessage":            utils.SanitizeText(conf.Server.UIWelcomeMessage),
+			"baseURL":                   str.SanitizeText(strings.TrimSuffix(conf.Server.BasePath, "/")),
+			"loginBackgroundURL":        str.SanitizeText(conf.Server.UILoginBackgroundURL),
+			"welcomeMessage":            str.SanitizeText(conf.Server.UIWelcomeMessage),
 			"maxSidebarPlaylists":       conf.Server.MaxSidebarPlaylists,
 			"enableTranscodingConfig":   conf.Server.EnableTranscodingConfig,
 			"enableDownloads":           conf.Server.EnableDownloads,
@@ -54,19 +56,21 @@ func serveIndex(ds model.DataStore, fs fs.FS, shareInfo *model.Share) http.Handl
 			"defaultUIVolume":           conf.Server.DefaultUIVolume,
 			"enableCoverAnimation":      conf.Server.EnableCoverAnimation,
 			"gaTrackingId":              conf.Server.GATrackingID,
-			"losslessFormats":           strings.ToUpper(strings.Join(consts.LosslessFormats, ",")),
+			"losslessFormats":           strings.ToUpper(strings.Join(mime.LosslessFormats, ",")),
 			"devActivityPanel":          conf.Server.DevActivityPanel,
 			"enableUserEditing":         conf.Server.EnableUserEditing,
 			"enableSharing":             conf.Server.EnableSharing,
+			"shareURL":                  conf.Server.ShareURL,
 			"defaultDownloadableShare":  conf.Server.DefaultDownloadableShare,
 			"devSidebarPlaylists":       conf.Server.DevSidebarPlaylists,
 			"lastFMEnabled":             conf.Server.LastFM.Enabled,
-			"lastFMApiKey":              conf.Server.LastFM.ApiKey,
 			"devShowArtistPage":         conf.Server.DevShowArtistPage,
 			"listenBrainzEnabled":       conf.Server.ListenBrainz.Enabled,
 			"enableExternalServices":    conf.Server.EnableExternalServices,
 			"enableReplayGain":          conf.Server.EnableReplayGain,
 			"defaultDownsamplingFormat": conf.Server.DefaultDownsamplingFormat,
+			"separator":                 string(os.PathSeparator),
+			"enableInspect":             conf.Server.Inspect.Enabled,
 		}
 		if strings.HasPrefix(conf.Server.UILoginBackgroundURL, "/") {
 			appConfig["loginBackgroundURL"] = path.Join(conf.Server.BasePath, conf.Server.UILoginBackgroundURL)
